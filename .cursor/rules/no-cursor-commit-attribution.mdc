@@ -1,0 +1,10 @@
+---
+description: Never add Cursor co-author or attribution trailers to git commits or PRs
+alwaysApply: true
+---
+
+# No Cursor commit attribution
+
+Never add `Co-authored-by: Cursor`, `Made-with: Cursor`, or any Cursor/agent trailer to commits or PRs.
+
+If a trailer is injected automatically, rewrite the commit before push so history stays clean.
