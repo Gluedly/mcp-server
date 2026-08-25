@@ -28,35 +28,73 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      - name: Install npm for trusted publishing
+        run: npm install -g npm@11.6.2
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Build package
         run: bun run build
 
-      - name: Prepare npm OIDC publish
-        run: |
-          echo "node=$(node -v) npm=$(npm -v)"
-          echo "OIDC URL present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
-          # setup-node may write _authToken into NPM_CONFIG_USERCONFIG
-          # ($RUNNER_TEMP/.npmrc), which blocks OIDC when NODE_AUTH_TOKEN is unset.
-          for npmrc in "${NPM_CONFIG_USERCONFIG:-}" "$HOME/.npmrc" .npmrc; do
-            if [ -n "$npmrc" ] && [ -f "$npmrc" ]; then
-              echo "Cleaning auth shim from $npmrc"
-              sed -i '/_authToken/d' "$npmrc"
-              sed -i '/always-auth/d' "$npmrc"
-            fi
-          done
-          # Registry only — no token line — so npm uses trusted publishing.
-          printf 'registry=https://registry.npmjs.org\n' > "$RUNNER_TEMP/npmrc-oidc"
-          echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/npmrc-oidc" >> "$GITHUB_ENV"
-
       - name: Publish to npm
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          unset NODE_AUTH_TOKEN
+          set -euo pipefail
           CURRENT=$(node -p "require('./package.json').version")
           if npm view "@gluedly/mcp-server@${CURRENT}" version >/dev/null 2>&1; then
             echo "Version $CURRENT already published, skipping"
             exit 0
           fi
-          npm publish --access public
+
+          echo "node=$(node -v) npm=$(npm -v)"
+          echo "OIDC URL present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+
+          # Prefer classic token when provided (reliable for private GitHub repos).
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "Publishing with NPM_TOKEN secret"
+            printf '%s\n' \
+              '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' \
+              'registry=https://registry.npmjs.org/' \
+              > "$RUNNER_TEMP/npmrc-token"
+            export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc-token"
+            npm publish --access public
+            exit 0
+          fi
+
+          # Otherwise use OIDC trusted publishing. Never leave an empty _authToken
+          # shim in place — it makes npm skip the OIDC exchange.
+          unset NODE_AUTH_TOKEN || true
+          for npmrc in "${NPM_CONFIG_USERCONFIG:-}" "$HOME/.npmrc" .npmrc; do
+            if [ -n "${npmrc}" ] && [ -f "${npmrc}" ]; then
+              sed -i '/_authToken/d' "${npmrc}" || true
+              sed -i '/always-auth/d' "${npmrc}" || true
+            fi
+          done
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/npmrc-oidc"
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc-oidc"
+
+          # Surface registry-side OIDC exchange errors (npm swallows these).
+          AUDIENCE='npm:registry.npmjs.org'
+          ID_JSON=$(curl -fsS \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}")
+          ID_TOKEN=$(node -e 'const j=JSON.parse(process.argv[1]); if(!j.value) process.exit(2); process.stdout.write(j.value)' "$ID_JSON")
+          echo "GitHub OIDC token claims:"
+          node -e 'const p=JSON.parse(Buffer.from(process.argv[1].split(".")[1],"base64url").toString()); console.log(JSON.stringify({sub:p.sub,repository:p.repository,job_workflow_ref:p.job_workflow_ref,ref:p.ref,environment:p.environment,repository_visibility:p.repository_visibility},null,2))' "$ID_TOKEN"
+          echo "npm OIDC token exchange:"
+          EXCHANGE_CODE=$(curl -sS -o "$RUNNER_TEMP/oidc-exchange.json" -w '%{http_code}' -X POST \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/@gluedly%2fmcp-server" \
+            -H "Authorization: Bearer ${ID_TOKEN}" \
+            -H "Accept: application/json")
+          echo "HTTP ${EXCHANGE_CODE}"
+          cat "$RUNNER_TEMP/oidc-exchange.json" || true
+          echo
+
+          if [ "$EXCHANGE_CODE" != "200" ]; then
+            echo "::error::npm OIDC token exchange failed. Check Trusted Publisher matches claims above, or add repo secret NPM_TOKEN."
+            exit 1
+          fi
+
+          npm publish --access public --loglevel verbose
