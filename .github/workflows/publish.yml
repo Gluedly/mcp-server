@@ -22,10 +22,12 @@ jobs:
         with:
           bun-version: latest
 
+      # Do not set registry-url: setup-node would write an .npmrc with
+      # ${NODE_AUTH_TOKEN}, which makes npm use token auth and breaks OIDC
+      # trusted publishing (misleading 404 on publish).
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
       - name: Ensure npm supports trusted publishing
@@ -44,4 +46,6 @@ jobs:
             echo "Version $CURRENT already published, skipping"
             exit 0
           fi
+          rm -f .npmrc
+          unset NODE_AUTH_TOKEN
           npm publish --access public
