@@ -94,7 +94,7 @@ jobs:
           echo "Exchange HTTP ${HTTP}"
           cat "$RUNNER_TEMP/oidc-exchange.json"
           echo
-          if [ "$HTTP" != "200" ]; then
+          if [ "$HTTP" != "200" ] && [ "$HTTP" != "201" ]; then
             echo "::error::Trusted Publisher OIDC exchange failed. Compare claims above to npm Trusted Publisher (repo Gluedly/mcp-server, workflow publish.yml, environment npm)."
             exit 1
           fi
