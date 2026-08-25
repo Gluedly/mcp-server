@@ -34,29 +34,81 @@ jobs:
       - name: Build package
         run: bun run build
 
-      - name: Prepare npm OIDC publish
+      - name: Publish to npm via trusted publisher OIDC
         run: |
-          echo "node=$(node -v) npm=$(npm -v)"
-          echo "OIDC URL present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
-          # setup-node may write _authToken into NPM_CONFIG_USERCONFIG
-          # ($RUNNER_TEMP/.npmrc), which blocks OIDC when NODE_AUTH_TOKEN is unset.
-          for npmrc in "${NPM_CONFIG_USERCONFIG:-}" "$HOME/.npmrc" .npmrc; do
-            if [ -n "$npmrc" ] && [ -f "$npmrc" ]; then
-              echo "Cleaning auth shim from $npmrc"
-              sed -i '/_authToken/d' "$npmrc"
-              sed -i '/always-auth/d' "$npmrc"
-            fi
-          done
-          # Registry only — no token line — so npm uses trusted publishing.
-          printf 'registry=https://registry.npmjs.org\n' > "$RUNNER_TEMP/npmrc-oidc"
-          echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/npmrc-oidc" >> "$GITHUB_ENV"
+          set -euo pipefail
 
-      - name: Publish to npm
-        run: |
-          unset NODE_AUTH_TOKEN
           CURRENT=$(node -p "require('./package.json').version")
           if npm view "@gluedly/mcp-server@${CURRENT}" version >/dev/null 2>&1; then
             echo "Version $CURRENT already published, skipping"
             exit 0
           fi
+
+          echo "node=$(node -v) npm=$(npm -v)"
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "::error::Missing GitHub OIDC request env (need permissions.id-token: write)"
+            exit 1
+          fi
+
+          # 1) GitHub OIDC id token for audience npm:registry.npmjs.org
+          AUDIENCE='npm:registry.npmjs.org'
+          REQUEST_URL=$(node -e '
+            const u = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+            u.searchParams.set("audience", process.argv[1]);
+            process.stdout.write(u.href);
+          ' "$AUDIENCE")
+          ID_JSON=$(curl -fsS \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            -H "Accept: application/json" \
+            "$REQUEST_URL")
+          ID_TOKEN=$(node -e '
+            const j = JSON.parse(process.argv[1]);
+            if (!j.value) { console.error(process.argv[1]); process.exit(2); }
+            process.stdout.write(j.value);
+          ' "$ID_JSON")
+
+          echo "GitHub OIDC claims (must match Trusted Publisher):"
+          node -e '
+            const p = JSON.parse(Buffer.from(process.argv[1].split(".")[1], "base64url").toString());
+            console.log(JSON.stringify({
+              sub: p.sub,
+              repository: p.repository,
+              repository_owner: p.repository_owner,
+              job_workflow_ref: p.job_workflow_ref,
+              ref: p.ref,
+              environment: p.environment,
+              repository_visibility: p.repository_visibility,
+              aud: p.aud,
+            }, null, 2));
+          ' "$ID_TOKEN"
+
+          # 2) Exchange for short-lived npm token (same as npm CLI trusted publishing)
+          PKG_ESC=$(node -e 'process.stdout.write(encodeURIComponent("@gluedly/mcp-server"))')
+          EXCHANGE_URL="https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${PKG_ESC}"
+          echo "Exchanging at: ${EXCHANGE_URL}"
+          HTTP=$(curl -sS -o "$RUNNER_TEMP/oidc-exchange.json" -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer ${ID_TOKEN}" \
+            -H "Accept: application/json" \
+            "$EXCHANGE_URL")
+          echo "Exchange HTTP ${HTTP}"
+          cat "$RUNNER_TEMP/oidc-exchange.json"
+          echo
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::Trusted Publisher OIDC exchange failed. Compare claims above to npm Trusted Publisher (repo Gluedly/mcp-server, workflow publish.yml, environment npm)."
+            exit 1
+          fi
+
+          NPM_PUBLISH_TOKEN=$(node -e '
+            const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            if (!j.token) { console.error(JSON.stringify(j)); process.exit(2); }
+            process.stdout.write(j.token);
+          ' "$RUNNER_TEMP/oidc-exchange.json")
+
+          # 3) Publish with the short-lived token from Trusted Publisher (not a long-lived NPM_TOKEN)
+          printf '%s\n' \
+            "//registry.npmjs.org/:_authToken=${NPM_PUBLISH_TOKEN}" \
+            "registry=https://registry.npmjs.org/" \
+            > "$RUNNER_TEMP/npmrc-oidc-publish"
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc-oidc-publish"
+          unset NODE_AUTH_TOKEN || true
           npm publish --access public
