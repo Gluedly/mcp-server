@@ -24,9 +24,12 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: "22.14"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
+
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -37,8 +40,7 @@ jobs:
       - name: Publish to npm
         run: |
           CURRENT=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view @gluedly/mcp-server version 2>/dev/null || true)
-          if [ "$CURRENT" = "$PUBLISHED" ]; then
+          if npm view "@gluedly/mcp-server@${CURRENT}" version >/dev/null 2>&1; then
             echo "Version $CURRENT already published, skipping"
             exit 0
           fi
