@@ -83,13 +83,14 @@ jobs:
           ' "$ID_TOKEN"
 
           # 2) Exchange for short-lived npm token (same as npm CLI trusted publishing)
-          PKG_ESC=$(node -e 'process.stdout.write(encodeURIComponent("@gluedly/mcp-server"))')
-          EXCHANGE_URL="https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${PKG_ESC}"
+          # npm uses npa().escapedName → @scope%2fname (keep @, encode / only).
+          # Do NOT use encodeURIComponent (that turns @ into %40 and npm returns package not found).
+          EXCHANGE_URL=$(node -e 'process.stdout.write(new URL("/-/npm/v1/oidc/token/exchange/package/@gluedly%2fmcp-server", "https://registry.npmjs.org/").href)')
           echo "Exchanging at: ${EXCHANGE_URL}"
-          HTTP=$(curl -sS -o "$RUNNER_TEMP/oidc-exchange.json" -w "%{http_code}" -X POST \
+          HTTP=$(curl -sS -g -o "$RUNNER_TEMP/oidc-exchange.json" -w "%{http_code}" -X POST \
             -H "Authorization: Bearer ${ID_TOKEN}" \
             -H "Accept: application/json" \
-            "$EXCHANGE_URL")
+            -- "$EXCHANGE_URL")
           echo "Exchange HTTP ${HTTP}"
           cat "$RUNNER_TEMP/oidc-exchange.json"
           echo
