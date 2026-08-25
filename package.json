@@ -1,12 +1,12 @@
 {
   "name": "@gluedly/mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Model Context Protocol server for the Gluedly public API",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "gluedly-mcp-server": "./dist/index.js"
+    "gluedly-mcp-server": "dist/index.js"
   },
   "files": [
     "dist",
@@ -43,7 +43,6 @@
     "url": "git+https://github.com/Gluedly/mcp-server.git"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   }
 }
